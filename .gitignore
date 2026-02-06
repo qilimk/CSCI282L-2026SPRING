@@ -34,3 +34,6 @@ Thumbs.db
 *.tmp
 *.bak
 *.orig
+
+# Solution directories (reference implementations)
+**/solution/
