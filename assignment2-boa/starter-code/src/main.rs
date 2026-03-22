@@ -12,6 +12,7 @@
 use im::HashMap;
 use sexp::Atom::*;
 use sexp::*;
+use std::collections::HashSet;
 use std::env;
 use std::fs::File;
 use std::io::prelude::*;
@@ -47,8 +48,22 @@ enum Expr {
     Number(i32),
     Id(String),
     Let(Vec<(String, Expr)>, Box<Expr>),
-    UnOp(Op1, Box<Expr>),
-    BinOp(Op2, Box<Expr>, Box<Expr>),
+    UnOp(UnOp, Box<Expr>),
+    BinOp(BinOp, Box<Expr>, Box<Expr>),
+}
+
+#[derive(Debug, Clone)]
+enum UnOp {
+    Add1,
+    Sub1,
+    Negate,
+}
+
+#[derive(Debug, Clone)]
+enum BinOp {
+    Plus,
+    Minus,
+    Times,
 }
 
 // ============= Assembly Representation =============
@@ -95,25 +110,44 @@ enum Instr {
 fn parse_expr(s: &Sexp) -> Expr {
     match s {
         // TODO: Handle number atoms
-        // Hint: Sexp::Atom(I(n)) => ...
-        //       Use i32::try_from(*n).unwrap_or_else(|_| panic!("Invalid"))
+        Sexp::Atom(I(n)) => Expr::Number(i32::try_from(*n).unwrap()),
 
         // TODO: Handle identifier atoms
-        // Hint: Sexp::Atom(S(name)) => ...
-        //       Make sure to check it's not a reserved keyword
+        Sexp::Atom(S(name)) => {
+            if name == "let" || name == "add1" || name == "sub1" || name == "negate" {
+                panic!("Invalid use of keyword as identifier: {}", name);
+            }
+            Expr::Id(name.to_string())
+        }
 
         // TODO: Handle list expressions
-        // Hint: Sexp::List(vec) => match &vec[..] { ... }
-        //
-        // Cases to handle:
-        //   [Sexp::Atom(S(op)), e] if op == "add1" => UnOp(Add1, ...)
-        //   [Sexp::Atom(S(op)), e] if op == "sub1" => UnOp(Sub1, ...)
-        //   [Sexp::Atom(S(op)), e1, e2] if op == "+" => BinOp(Plus, ...)
-        //   [Sexp::Atom(S(op)), e1, e2] if op == "-" => BinOp(Minus, ...)
-        //   [Sexp::Atom(S(op)), e1, e2] if op == "*" => BinOp(Times, ...)
-        //   [Sexp::Atom(S(op)), Sexp::List(bindings), body] if op == "let" => ...
+           Sexp::List(vec) => match &vec[..] {
+            // Let expression
+            [Sexp::Atom(S(op)), Sexp::List(bindings), body] if op == "let" => {
+                let parsed_bindings = bindings.iter().map(parse_bind).collect();
+                Expr::Let(parsed_bindings, Box::new(parse_expr(body)))
+            }
+            
+            // Unary operations
+            [Sexp::Atom(S(op)), e] if op == "add1" => 
+                Expr::UnOp(UnOp::Add1, Box::new(parse_expr(e))),
+            [Sexp::Atom(S(op)), e] if op == "sub1" => 
+                Expr::UnOp(UnOp::Sub1, Box::new(parse_expr(e))),
+            [Sexp::Atom(S(op)), e] if op == "negate" => 
+                Expr::UnOp(UnOp::Negate, Box::new(parse_expr(e))),
+            
+            // Binary operations
+            [Sexp::Atom(S(op)), e1, e2] if op == "+" => 
+                Expr::BinOp(BinOp::Plus, Box::new(parse_expr(e1)), Box::new(parse_expr(e2))),
+            [Sexp::Atom(S(op)), e1, e2] if op == "-" => 
+                Expr::BinOp(BinOp::Minus, Box::new(parse_expr(e1)), Box::new(parse_expr(e2))),
+            [Sexp::Atom(S(op)), e1, e2] if op == "*" => 
+                Expr::BinOp(BinOp::Times, Box::new(parse_expr(e1)), Box::new(parse_expr(e2))),
+            
+            _ => panic!("Invalid expression: {:?}", vec),
+        },
 
-        _ => panic!("Invalid"),
+       _ => panic!("Invalid"),
     }
 }
 
@@ -134,7 +168,15 @@ fn parse_bind(s: &Sexp) -> (String, Expr) {
     //     _ => panic!("Invalid"),
     // }
 
-    panic!("TODO: Implement parse_bind")
+    match s {
+        Sexp::List(pair) => match &pair[..] {
+            [Sexp::Atom(S(name)), expr] => {
+                (name.to_string(), parse_expr(expr))
+            }
+            _ => panic!("Invalid binding: {:?}", pair),
+        },
+        _ => panic!("Invalid binding: {:?}", s),
+    }
 }
 
 // ============= Compilation =============
@@ -175,45 +217,94 @@ fn parse_bind(s: &Sexp) -> (String, Expr) {
 fn compile_to_instrs(e: &Expr, si: i32, env: &HashMap<String, i32>) -> Vec<Instr> {
     match e {
         // TODO: Number - move immediate value to RAX
-        // vec![IMov(Val::Reg(Reg::RAX), Val::Imm(*n))]
+        Expr::Number(n) => vec![Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(*n))],
 
         // TODO: Id - look up variable in environment, load from stack
-        // 1. Look up name in env to get stack offset
-        //    env.get(name).unwrap_or_else(|| panic!("Unbound variable identifier {}", name))
-        // 2. Generate: IMov(Reg(RAX), RegOffset(RSP, offset))
+        Expr::Id(name) => {
+            let offset = *env
+                .get(name)
+                .unwrap_or_else(|| panic!("Unbound variable identifier {}", name));
+            vec![Instr::IMov(
+                Val::Reg(Reg::RAX),
+                Val::RegOffset(Reg::RSP, offset),
+            )]
+        }
 
         // TODO: UnOp - compile subexpression, then apply operation
-        // Add1: compile e, then IAdd(Reg(RAX), Imm(1))
-        // Sub1: compile e, then ISub(Reg(RAX), Imm(1))
+        Expr::UnOp(op, expr) => {
+            let mut instrs = compile_to_instrs(expr, si, env);
+            match op {
+                UnOp::Add1 => instrs.push(Instr::IAdd(Val::Reg(Reg::RAX), Val::Imm(1))),
+                UnOp::Sub1 => instrs.push(Instr::ISub(Val::Reg(Reg::RAX), Val::Imm(1))),
+                UnOp::Negate => instrs.push(Instr::IMul(Val::Reg(Reg::RAX), Val::Imm(-1))),
+            }
+            instrs
+        }
 
         // TODO: BinOp - compile both operands using the stack
-        // Strategy:
-        //   1. Compile left operand (result in RAX)
-        //   2. Store RAX at [rsp - 8*si] (save left result)
-        //   3. Compile right operand with si+1 (result in RAX)
-        //   4. Perform operation: stack_value OP rax -> rax
-        //
-        // For Plus:  load left from stack, add rax
-        // For Minus: load left from stack, sub rax
-        // For Times: load left from stack, mul rax
-        //
-        // Hint: You may need to move the left operand back to RAX
-        //       and then apply the operation with the right operand
+        Expr::BinOp(op, left, right) => {
+            let stack_offset = -8 * si;
+            let right_offset = -8 * (si + 1);
+            let mut instrs = compile_to_instrs(left, si, env);
+            instrs.push(Instr::IMov(
+                Val::RegOffset(Reg::RSP, stack_offset),
+                Val::Reg(Reg::RAX),
+            ));
+            instrs.extend(compile_to_instrs(right, si + 1, env));
+
+            match op {
+                BinOp::Plus => instrs.push(Instr::IAdd(
+                    Val::Reg(Reg::RAX),
+                    Val::RegOffset(Reg::RSP, stack_offset),
+                )),
+                BinOp::Minus => {
+                    instrs.push(Instr::IMov(
+                        Val::RegOffset(Reg::RSP, right_offset),
+                        Val::Reg(Reg::RAX),
+                    ));
+                    instrs.push(Instr::IMov(
+                        Val::Reg(Reg::RAX),
+                        Val::RegOffset(Reg::RSP, stack_offset),
+                    ));
+                    instrs.push(Instr::ISub(
+                        Val::Reg(Reg::RAX),
+                        Val::RegOffset(Reg::RSP, right_offset),
+                    ));
+                }
+                BinOp::Times => instrs.push(Instr::IMul(
+                    Val::Reg(Reg::RAX),
+                    Val::RegOffset(Reg::RSP, stack_offset),
+                )),
+            }
+
+            instrs
+        }
 
         // TODO: Let - bind variables and compile body
-        // Strategy:
-        //   1. Check for duplicate bindings - panic!("Duplicate binding")
-        //   2. For each binding (name, expr):
-        //      a. Compile expr with current si and env
-        //      b. Store result at [rsp - 8*si]
-        //      c. Add name -> -8*si to env
-        //      d. Increment si
-        //   3. Compile body with final si and env
-        //
-        // Duplicate check: Keep a set of names seen so far
-        // If you see a name twice, panic!("Duplicate binding")
+        Expr::Let(bindings, body) => {
+            let mut seen = HashSet::new();
+            let mut instrs = Vec::new();
+            let mut next_si = si;
+            let mut new_env = env.clone();
 
-        _ => panic!("TODO: Implement compile_to_instrs for {:?}", e),
+            for (name, expr) in bindings {
+                if !seen.insert(name.clone()) {
+                    panic!("Duplicate binding");
+                }
+
+                let stack_offset = -8 * next_si;
+                instrs.extend(compile_to_instrs(expr, next_si, &new_env));
+                instrs.push(Instr::IMov(
+                    Val::RegOffset(Reg::RSP, stack_offset),
+                    Val::Reg(Reg::RAX),
+                ));
+                new_env.insert(name.clone(), stack_offset);
+                next_si += 1;
+            }
+
+            instrs.extend(compile_to_instrs(body, next_si, &new_env));
+            instrs
+        }
     }
 }
 
@@ -335,7 +426,7 @@ mod tests {
     fn test_parse_add1() {
         let expr = parse_str("(add1 5)");
         match expr {
-            Expr::UnOp(Op1::Add1, _) => (),
+            Expr::UnOp(UnOp::Add1, _) => (),
             _ => panic!("Expected UnOp(Add1, ...), got {:?}", expr),
         }
     }
@@ -344,7 +435,7 @@ mod tests {
     fn test_parse_binary_plus() {
         let expr = parse_str("(+ 1 2)");
         match expr {
-            Expr::BinOp(Op2::Plus, _, _) => (),
+            Expr::BinOp(BinOp::Plus, _, _) => (),
             _ => panic!("Expected BinOp(Plus, ...), got {:?}", expr),
         }
     }
