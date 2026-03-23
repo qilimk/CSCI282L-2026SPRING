@@ -8,7 +8,7 @@ test/%.s: test/%.snek src/main.rs
 # Pattern rule to assemble .s files and link into executables
 # Change -f elf64 to -f macho64 on macOS
 test/%.run: test/%.s runtime/start.rs
-	nasm -f macho64 test/$*.s -o runtime/our_code.o
+	nasm -f elf64 test/$*.s -o runtime/our_code.o
 	ar rcs runtime/libour_code.a runtime/our_code.o
 	rustc -L runtime/ runtime/start.rs -o test/$*.run
 

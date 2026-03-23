@@ -110,7 +110,7 @@ enum Instr {
 fn parse_expr(s: &Sexp) -> Expr {
     match s {
         // TODO: Handle number atoms
-        Sexp::Atom(I(n)) => Expr::Number(i32::try_from(*n).unwrap()),
+        Sexp::Atom(I(n)) => Expr::Number(i32::try_from(*n).unwrap_or_else(|_| panic!("Invalid"))),
 
         // TODO: Handle identifier atoms
         Sexp::Atom(S(name)) => {
